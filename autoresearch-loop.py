@@ -58,6 +58,7 @@ def ask_llm(system_prompt, user_prompt, max_tokens=4096):
         ],
         "max_tokens": max_tokens,
         "temperature": 0.7,
+        "thinking": {"type": "disabled"},
     }
 
     req = urllib.request.Request(
@@ -86,6 +87,14 @@ def propose_experiment(context, history, n_try):
     sys_prompt = """You are optimizing nanochat train.py for lowest val_bpb in 5min.
 Modify ANYTHING in train.py. DO NOT modify prepare.py or add deps.
 Simpler is better. Blackwell GB10 (cap 12.1): FA3 FakeTensor bug, work around it.
+
+IMPORTANT API CONTEXT (do NOT change these imports):
+- `from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb`
+- `make_dataloader()` returns (train_loader, val_loader) — no arguments needed
+- `evaluate_bpb(model)` returns val_bpb
+- `Tokenizer` has .encode(text) and .decode(ids)
+- Training loop uses `for step, (inp, tgt) in enumerate(train_loader):` where inp/tgt are shape (B, T)
+
 Output JSON: {"idea": str, "patch": str (full train.py content), "patch_type": "replace|none", "expected_effect": str}"""
 
     user_prompt = f"""Experiment #{n_try}.
@@ -101,20 +110,33 @@ Propose next experiment. Output ONLY valid JSON."""
     if not response:
         return None
 
-    # Parse JSON from response
-    try:
-        # Find JSON block
-        json_match = re.search(r"\{[^}]*\}", response, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group())
-    except json.JSONDecodeError:
-        pass
+    # Parse JSON from response — handle ```json blocks and plain JSON
+    # Strip markdown code fences first
+    cleaned = re.sub(r"```(?:json)?\s*\n?(.*?)\n?```", r"\1", response, flags=re.DOTALL)
+    cleaned = cleaned.strip()
 
-    # Try parsing the whole response
+    # Try parsing cleaned response
     try:
-        return json.loads(response)
+        return json.loads(cleaned)
     except json.JSONDecodeError:
-        log(f"Failed to parse LLM response as JSON: {response[:200]}", "ERROR")
+        # Try finding a JSON object in the text
+        brace_depth = 0
+        start = -1
+        for i, ch in enumerate(cleaned):
+            if ch == '{':
+                if start == -1:
+                    start = i
+                brace_depth += 1
+            elif ch == '}':
+                brace_depth -= 1
+                if brace_depth == 0 and start >= 0:
+                    try:
+                        return json.loads(cleaned[start:i+1])
+                    except json.JSONDecodeError:
+                        pass
+                    start = -1
+
+        log(f"Failed to parse LLM response as JSON: {cleaned[:200]}", "ERROR")
         return None
 
 
