@@ -1,0 +1,146 @@
+#!/bin/bash
+# autoresearch-cron.sh
+# Off-peak GPU utilization cron wrapper
+# Runs karpathy autoresearch loop ONLY during off-peak hours (UTC 23-07)
+# and ONLY if GPU utilization is under 40%.
+# Uses maximum niceness (lowest CPU priority) so it's first killed on OOM.
+
+set -euo pipefail
+
+# ──────────────────────────────────────────────────────────────
+# Configuration
+# ──────────────────────────────────────────────────────────────
+WORKSPACE="/home/newstex/workspace/autoresearch"
+CODEX_BIN="/home/newstex/.hermes/node/bin/codex"
+LOCKFILE="/tmp/autoresearch-cron.lock"
+PIDFILE="/tmp/autoresearch-cron.pid"
+GPU_THRESHOLD=40
+OFFPEAK_START=23   # UTC hour when off-peak begins
+OFFPEAK_END=7      # UTC hour when off-peak ends (stop before peak)
+MAX_RUN_SECONDS=14400  # Max 4 hours per session (safety limit)
+
+# ──────────────────────────────────────────────────────────────
+# Logging
+# ──────────────────────────────────────────────────────────────
+LOG_DIR="/home/newstex/.hermes/logs"
+mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/autoresearch-cron.log"
+
+log() {
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$LOG"
+}
+
+# ──────────────────────────────────────────────────────────────
+# Time check: only run during off-peak hours (UTC 23-07)
+# ──────────────────────────────────────────────────────────────
+current_hour=$(date -u +%H)
+current_hour_dec=$(date -u +%k)
+
+if [ "$current_hour_dec" -ge "$OFFPEAK_START" ] || [ "$current_hour_dec" -lt "$OFFPEAK_END" ]; then
+    log "Off-peak hour (UTC $current_hour) — proceeding"
+else
+    log "Peak hour (UTC $current_hour) — skipping. Off-peak is UTC $OFFPEAK_START-$OFFPEAK_END"
+    exit 0
+fi
+
+# ──────────────────────────────────────────────────────────────
+# GPU utilization check
+# ──────────────────────────────────────────────────────────────
+GPU_UTIL=$(nvidia-smi -q 2>/dev/null | grep -A4 "Utilization" | grep "GPU" | awk '{print $3}' | sed 's/%//' | head -1)
+
+if [ -z "$GPU_UTIL" ]; then
+    # Fallback: nvidia-smi -q didn't work, try direct query
+    GPU_UTIL=$(nvidia-smi --query-gpu=utilization.gpu.percent --format=csv,noheader 2>/dev/null | head -1 | sed 's/%//' || echo "0")
+fi
+
+GPU_UTIL=${GPU_UTIL:-0}
+
+if [ "$GPU_UTIL" -lt "$GPU_THRESHOLD" ]; then
+    log "GPU utilization $GPU_UTIL% < $GPU_THRESHOLD% — proceeding"
+else
+    log "GPU utilization $GPU_UTIL% >= $GPU_THRESHOLD% — skipping"
+    exit 0
+fi
+
+# ──────────────────────────────────────────────────────────────
+# Lock check — don't run multiple instances
+# ──────────────────────────────────────────────────────────────
+if [ -f "$LOCKFILE" ]; then
+    # Check if lock is stale (process no longer running)
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        log "Autoresearch already running (PID $(cat "$PIDFILE")) — skipping"
+        exit 0
+    else
+        log "Stale lock found — removing"
+        rm -f "$LOCKFILE" "$PIDFILE"
+    fi
+fi
+
+# ──────────────────────────────────────────────────────────────
+# Data readiness check
+# ──────────────────────────────────────────────────────────────
+if [ ! -d "$HOME/.cache/autoresearch/data" ] || [ ! -d "$HOME/.cache/autoresearch/tokenizer" ]; then
+    log "Data not prepared — running prepare.py"
+    cd "$WORKSPACE"
+    uv run prepare.py 2>&1 >> "$LOG"
+fi
+
+# ──────────────────────────────────────────────────────────────
+# Create lock
+# ──────────────────────────────────────────────────────────────
+echo $$ > "$PIDFILE"
+touch "$LOCKFILE"
+log "Starting autoresearch loop (PID $$)"
+
+# ──────────────────────────────────────────────────────────────
+# Run the autoresearch agent with maximum niceness
+# ──────────────────────────────────────────────────────────────
+#
+# Strategy: launch Codex CLI with the autoresearch program.md as its
+# objective. Codex will autonomously iterate the experiment loop.
+# Maximum niceness ensures it yields CPU to any other process.
+#
+# We set a timeout so it stops before peak hours begin.
+# ──────────────────────────────────────────────────────────────
+
+# Calculate how many seconds until next off-peak end (07:00 UTC)
+# If current hour >= 23, next off-peak end is tomorrow at 07:00
+if [ "$current_hour_dec" -ge "$OFFPEAK_START" ]; then
+    # We're in the evening portion of off-peak (23:00-23:59)
+    # Off-peak ends at 07:00 tomorrow
+    seconds_to_07=$(( (24 - current_hour_dec + $OFFPEAK_END) * 3600 ))
+else
+    # We're in the morning portion (00:00-06:59)
+    seconds_to_07=$(( ($OFFPEAK_END - current_hour_dec) * 3600 ))
+fi
+
+# Cap at MAX_RUN_SECONDS
+TIMEOUT=$(( seconds_to_07 < MAX_RUN_SECONDS ? seconds_to_07 : MAX_RUN_SECONDS ))
+log "Run timeout: ${TIMEOUT}s (until ~07:00 UTC or max)"
+
+# Construct the Codex prompt from program.md
+PROMPT=$(cat <<'EOF'
+Read the file program.md in this repository. Follow its instructions
+exactly. This is an autonomous research session — do NOT stop to ask
+for confirmation. Run the experiment loop indefinitely until you are
+stopped. Start with the setup steps, then enter the loop.
+EOF
+)
+
+# Launch Codex in background with maximum niceness
+cd "$WORKSPACE"
+nice -n 19 \
+    ionice --class idle \
+    timeout "$TIMEOUT" \
+    "$CODEX_BIN" exec --full-auto "$PROMPT" \
+    2>&1 >> "$LOG"
+
+EXIT_CODE=$?
+log "Codex exited with code $EXIT_CODE"
+
+# ──────────────────────────────────────────────────────────────
+# Cleanup
+# ──────────────────────────────────────────────────────────────
+rm -f "$LOCKFILE" "$PIDFILE"
+log "Autoresearch cron complete (exit $EXIT_CODE)"
+exit $EXIT_CODE
