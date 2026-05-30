@@ -57,9 +57,13 @@ architecture efficiency, memory footprint, or training speed are especially
 valuable for the Dream++ use case (efficient LLM inference for proposal
 generation).
 
-**Platform note**: This is an NVIDIA GB10 (Blackwell). FA3 support may need
-kernels-community flash-attn3 rather than varunneal's Hopper-only build. Adjust
-the kernel import in `train.py` accordingly.
+**Platform note**: This is an NVIDIA GB10 (Blackwell, cap 12.1).
+- FA3 from kernels-community is used (Hopper cap 9.0 check → false)
+- **Known issue**: FA3 + torch.compile causes FakeTensor errors on this arch.
+  The agent must fix this: try disabling torch.compile for the attn module,
+  using a fallback attention, or patching the kernel import.
+- This is the first research challenge — the baseline won't run until the
+  attention mechanism is fixed for Blackwell.
 
 **VRAM** is a soft constraint. ~100GB available headroom on this platform.
 Some increase is acceptable for meaningful val_bpb gains.
