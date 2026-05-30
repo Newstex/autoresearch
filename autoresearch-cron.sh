@@ -92,46 +92,21 @@ touch "$LOCKFILE"
 log "Starting autoresearch loop (PID $$)"
 
 # ──────────────────────────────────────────────────────────────
-# Run the autoresearch agent with maximum niceness
+# Run the autoresearch Python loop with maximum niceness
 # ──────────────────────────────────────────────────────────────
 #
-# Strategy: launch Codex CLI with the autoresearch program.md as its
-# objective. Codex will autonomously iterate the experiment loop.
+# Strategy: launch the Python loop controller which uses Hermes's
+# own LLM provider to make decisions and iterate experiments.
 # Maximum niceness ensures it yields CPU to any other process.
 #
-# We set a timeout so it stops before peak hours begin.
+# The Python script handles time limits internally (stops at 07:00).
 # ──────────────────────────────────────────────────────────────
 
-# Calculate how many seconds until next off-peak end (07:00 UTC)
-# If current hour >= 23, next off-peak end is tomorrow at 07:00
-if [ "$current_hour_dec" -ge "$OFFPEAK_START" ]; then
-    # We're in the evening portion of off-peak (23:00-23:59)
-    # Off-peak ends at 07:00 tomorrow
-    seconds_to_07=$(( (24 - current_hour_dec + $OFFPEAK_END) * 3600 ))
-else
-    # We're in the morning portion (00:00-06:59)
-    seconds_to_07=$(( ($OFFPEAK_END - current_hour_dec) * 3600 ))
-fi
-
-# Cap at MAX_RUN_SECONDS
-TIMEOUT=$(( seconds_to_07 < MAX_RUN_SECONDS ? seconds_to_07 : MAX_RUN_SECONDS ))
-log "Run timeout: ${TIMEOUT}s (until ~07:00 UTC or max)"
-
-# Construct the Codex prompt from program.md
-PROMPT=$(cat <<'EOF'
-Read the file program.md in this repository. Follow its instructions
-exactly. This is an autonomous research session — do NOT stop to ask
-for confirmation. Run the experiment loop indefinitely until you are
-stopped. Start with the setup steps, then enter the loop.
-EOF
-)
-
-# Launch Codex in background with maximum niceness
 cd "$WORKSPACE"
 nice -n 19 \
     ionice --class idle \
-    timeout "$TIMEOUT" \
-    "$CODEX_BIN" exec --full-auto "$PROMPT" \
+    timeout 21600 \
+    python3 autoresearch-loop.py \
     2>&1 >> "$LOG"
 
 EXIT_CODE=$?
