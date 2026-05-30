@@ -46,19 +46,18 @@ fi
 # ──────────────────────────────────────────────────────────────
 # GPU utilization check
 # ──────────────────────────────────────────────────────────────
-GPU_UTIL=$(nvidia-smi -q 2>/dev/null | grep -A4 "Utilization" | grep "GPU" | awk '{print $3}' | sed 's/%//' | head -1)
+# Note: Blackwell GB10 GPU-Util reports compute mode % (always ~94% even idle).
+# Use memory utilization instead — 0% means no active compute workload.
+GPU_MEM_UTIL=$(nvidia-smi -q 2>/dev/null | grep -A4 "Utilization" | grep "Memory" | awk '{print $3}' | sed 's/%//' | head -1)
 
-if [ -z "$GPU_UTIL" ]; then
-    # Fallback: nvidia-smi -q didn't work, try direct query
-    GPU_UTIL=$(nvidia-smi --query-gpu=utilization.gpu.percent --format=csv,noheader 2>/dev/null | head -1 | sed 's/%//' || echo "0")
+if [ -z "$GPU_MEM_UTIL" ]; then
+    GPU_MEM_UTIL=0
 fi
 
-GPU_UTIL=${GPU_UTIL:-0}
-
-if [ "$GPU_UTIL" -lt "$GPU_THRESHOLD" ]; then
-    log "GPU utilization $GPU_UTIL% < $GPU_THRESHOLD% — proceeding"
+if [ "$GPU_MEM_UTIL" -lt "$GPU_THRESHOLD" ]; then
+    log "GPU memory utilization $GPU_MEM_UTIL% < $GPU_THRESHOLD% — proceeding"
 else
-    log "GPU utilization $GPU_UTIL% >= $GPU_THRESHOLD% — skipping"
+    log "GPU memory utilization $GPU_MEM_UTIL% >= $GPU_THRESHOLD% — skipping"
     exit 0
 fi
 
