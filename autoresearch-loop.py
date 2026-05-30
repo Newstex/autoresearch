@@ -69,7 +69,7 @@ def ask_llm(system_prompt, user_prompt, max_tokens=4096):
 
     for attempt in range(3):
         try:
-            resp = urllib.request.urlopen(req, timeout=120)
+            resp = urllib.request.urlopen(req, timeout=300)
             body = json.loads(resp.read().decode())
             content = body["choices"][0]["message"]["content"]
             return content
@@ -83,33 +83,19 @@ def ask_llm(system_prompt, user_prompt, max_tokens=4096):
 
 def propose_experiment(context, history, n_try):
     """Ask the LLM to propose the next experiment."""
-    sys_prompt = """You are an AI research scientist optimizing a nanochat-style LLM training script.
-Your goal is to achieve the lowest possible val_bpb within a 5-minute time budget.
-You can modify ANYTHING in train.py: architecture, hyperparameters, optimizer, batch size, etc.
-You may NOT modify prepare.py or add new dependencies.
+    sys_prompt = """You are optimizing nanochat train.py for lowest val_bpb in 5min.
+Modify ANYTHING in train.py. DO NOT modify prepare.py or add deps.
+Simpler is better. Blackwell GB10 (cap 12.1): FA3 FakeTensor bug, work around it.
+Output JSON: {"idea": str, "patch": str (full train.py content), "patch_type": "replace|none", "expected_effect": str}"""
 
-Rules:
-- Simpler is better. A 0.001 improvement that adds 20 hacky lines is not worth it.
-- A 0.001 improvement from deleting code is great.
-- VRAM is a soft constraint (~100GB available on this Blackwell GB10).
-- The FA3 kernel fails with FakeTensor on Blackwell (cap 12.1). You MUST work around this.
+    user_prompt = f"""Experiment #{n_try}.
+History (last 20):
+{history[-20:] if history else 'None yet.'}
 
-Output ONLY a JSON object with keys:
-- "idea": short description of the experiment
-- "patch": the exact diff/patch to apply to train.py (or "none" if no change needed)
-- "patch_type": "replace" or "none"
-- "expected_effect": what you expect to happen
-"""
+Code context (first 2000 chars):
+{context[:2000]}
 
-    user_prompt = f"""We are on experiment #{n_try} in the autoresearch loop.
-
-Current experiment history (last 20):
-{history[-20:] if history else 'No experiments yet.'}
-
-Context from program.md and code:
-{context[:3000]}
-
-Propose the next experiment. Output ONLY valid JSON."""
+Propose next experiment. Output ONLY valid JSON."""
     
     response = ask_llm(sys_prompt, user_prompt)
     if not response:
